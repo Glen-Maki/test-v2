@@ -132,7 +132,7 @@ export const Test = () => {
     requestAnimationFrame(render);
   };
 
-  const loop = async (video: TNetInput) => {
+  const loop = async (video: any) => {
     if (!faceapi.nets.tinyFaceDetector.params) {
       setTimeout(() => loop(video));
     }
@@ -148,6 +148,7 @@ export const Test = () => {
     if (result) {
       // デバッグをしつつ決めた値をスレッショルドとする(表情筋が硬い場合は下げようね！)
       if (result.expressions.happy > 0.7) {
+        console.log("egao");
         setSmiling(true);
       }
       // 頭部回転角度を鼻のベクトルに近似する
@@ -163,17 +164,13 @@ export const Test = () => {
       const upperLip = result.landmarks.positions[51];
       const lowerLip = result.landmarks.positions[57];
       setLipDist(lowerLip.y - upperLip.y);
-      /*
-              // デバッグ用にcanvasに表示する
-              if (landmarkCanvas) {
-                const dims = faceapi.matchDimensions(
-                  landmarkCanvas,
-                  video,
-                  true
-                );
-                const resizedResult = faceapi.resizeResults(result, dims);
-                faceapi.draw.drawFaceLandmarks(landmarkCanvas, resizedResult);
-              }*/
+
+      // デバッグ用にcanvasに表示する
+      /*if (landmarkCanvas) {
+        const dims = faceapi.matchDimensions(landmarkCanvas, video, true);
+        const resizedResult = faceapi.resizeResults(result, dims);
+        faceapi.draw.drawFaceLandmarks(landmarkCanvas, resizedResult);
+      }*/
     }
 
     setTimeout(() => loop(video));
@@ -192,9 +189,25 @@ export const Test = () => {
     }
 
     // canvas取得など
-    // const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-    // const canvasContext = canvas.getContext("2d");
-    // setLandmarkCanvas(canvas);
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    setLandmarkCanvas(canvas);
+
+    // model読み込みなど
+    const loadModels = async () => {
+      const MODEL_URL = process.env.PUBLIC_URL + "/models";
+
+      Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        // faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        // faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+        // faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL),
+        faceapi.loadFaceLandmarkModel(MODEL_URL),
+        faceapi.loadFaceExpressionModel(MODEL_URL),
+      ]).then();
+      console.log("model load completed");
+      setModelsLoaded(true);
+    };
+    loadModels();
 
     // vrm モデル読み込み
     loader.load(
@@ -202,17 +215,13 @@ export const Test = () => {
       (gltf) => {
         VRM.from(gltf).then((vrmModel) => {
           setVRM(vrmModel);
-          if (vrmModel) {
-            scene.add(vrmModel.scene);
-            if (
-              vrmModel.humanoid?.getBoneNode(VRMSchema.HumanoidBoneName.Hips)
-            ) {
-              vrmModel.humanoid.getBoneNode(
-                VRMSchema.HumanoidBoneName.Hips
-              )!.rotation.y = Math.PI;
-            }
-            console.log(vrm);
+          scene.add(vrmModel.scene);
+          if (vrmModel.humanoid?.getBoneNode(VRMSchema.HumanoidBoneName.Hips)) {
+            vrmModel.humanoid.getBoneNode(
+              VRMSchema.HumanoidBoneName.Hips
+            )!.rotation.y = Math.PI;
           }
+          console.log(vrm);
         });
       },
       (progress) =>
@@ -223,22 +232,6 @@ export const Test = () => {
         ),
       (error) => console.error(error)
     );
-  }, []);
-
-  useEffect(() => {
-    // model読み込みなど
-    const loadModels = async () => {
-      const MODEL_URL = process.env.PUBLIC_URL + "/models";
-
-      Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-        faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL),
-      ]).then();
-      setModelsLoaded(true);
-    };
-    loadModels();
   }, []);
 
   const startVideo = () => {
@@ -262,6 +255,7 @@ export const Test = () => {
       });
   };
 
+  /*
   const handleVideoOnPlay = () => {
     // いらないかも
     // landmark描画など
@@ -307,6 +301,7 @@ export const Test = () => {
       }
     }, 100);
   };
+  */
 
   const closeWebcam = () => {
     videoRef.current?.pause();
@@ -361,7 +356,6 @@ export const Test = () => {
             height={videoHeight}
             width={videoWidth}
             style={{ borderRadius: "10px" }}
-            onPlay={handleVideoOnPlay}
           />
           <canvas id="canvas" style={{ position: "absolute" }} />
         </div>
