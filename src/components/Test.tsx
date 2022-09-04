@@ -1,25 +1,232 @@
 import React, { useState, useRef, useEffect } from "react";
+// faceapi
 import * as faceapi from "face-api.js";
-import { TDrawDetectionsInput } from "face-api.js/build/commonjs/draw";
+// three vrm
+import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
+import { VRM, VRMSchema } from "@pixiv/three-vrm";
+import { TNetInput } from "face-api.js";
 
+// component
 export const Test = () => {
   const [modelsLoaded, setModelsLoaded] = useState<boolean>(false);
   const [captureVideo, setCaptureVideo] = useState(false);
+  const mountRef = useRef<HTMLDivElement>(null);
 
-  const [context, setContext] = useState<HTMLCanvasElement | null>(null);
+  // three関連 useState
+  const [blinking, setBlinking] = useState<boolean>(false);
+  const [smiling, setSmiling] = useState<boolean>(false);
+
+  const [landmarkCanvas, setLandmarkCanvas] =
+    useState<HTMLCanvasElement | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoHeight = 480;
   const videoWidth = 640;
+  const VRMPath = `${window.location.origin}/AliciaSolid.vrm`;
+
   // const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // three関連
+  const scene = new THREE.Scene();
+  const loader = new GLTFLoader();
+  const camera = new THREE.PerspectiveCamera(
+    30.0,
+    videoWidth / videoHeight,
+    0.1,
+    20.0
+  );
+  const renderer = new THREE.WebGLRenderer();
+  const light = new THREE.DirectionalLight(0xffffff, 1);
+  const [vrm, setVRM] = useState<VRM | undefined>(undefined);
+  const [lipDist, setLipDist] = useState<number | undefined>(undefined);
+  const [headYawAngle, setHeadYawAngle] = useState<number | undefined>(
+    undefined
+  );
+  const [prevHeadYawAngle, setPrevHeadYawAngle] = useState<number | undefined>(
+    undefined
+  );
+
+  // VRM描画のdiv
+  const elm = mountRef.current;
+  const $body = document.querySelector("vtuber");
+  const $avatarCanvas = renderer.domElement;
+  $avatarCanvas.id = "avatar-canvas";
+
+  // three.js settings
+  renderer.setClearColor(0xeeeeee);
+  renderer.setSize(videoWidth, videoHeight);
+  camera.position.set(0.0, 1.35, 0.8);
+  light.position.set(0, 100, 30);
+  scene.add(light);
+  const gridHelper = new THREE.GridHelper(10, 10);
+  scene.add(gridHelper);
+  const axesHelper = new THREE.AxesHelper(5);
+  scene.add(axesHelper);
+  const clock = new THREE.Clock();
+
+  // 描画
+  const render = () => {
+    if (vrm && vrm.humanoid) {
+      const deltaTime = clock.getDelta();
+      let s = Math.sin(Math.PI * clock.elapsedTime);
+      if (smiling) {
+        s *= 2;
+        vrm.blendShapeProxy?.setValue(VRMSchema.BlendShapePresetName.A, 0);
+        vrm.blendShapeProxy?.setValue(VRMSchema.BlendShapePresetName.Joy, s);
+        if (Math.abs(s) < 0.1) {
+          setSmiling(false);
+          vrm.blendShapeProxy?.setValue(VRMSchema.BlendShapePresetName.Joy, 0);
+        }
+      } else if (blinking) {
+        s *= 5;
+        vrm.blendShapeProxy?.setValue(VRMSchema.BlendShapePresetName.Blink, s);
+        if (Math.abs(s) < 0.1) {
+          setBlinking(false);
+          vrm.blendShapeProxy?.setValue(
+            VRMSchema.BlendShapePresetName.Blink,
+            0
+          );
+        }
+      }
+      // vrm.blendShapeProxy.setValue( 'a', 0.5 + 0.5 * s );
+      if (lipDist && !smiling) {
+        // 初期距離(30)を引いて、口を最大限に開けた時を最大値とした時を参考に割合を決める
+        let lipRatio = (lipDist - 30) / 25;
+        if (lipRatio < 0) {
+          lipRatio = 0;
+        } else if (lipRatio > 1) {
+          lipRatio = 1;
+        }
+        vrm.blendShapeProxy?.setValue(
+          VRMSchema.BlendShapePresetName.A,
+          lipRatio
+        );
+      }
+      if (headYawAngle) {
+        if (prevHeadYawAngle) {
+          if (Math.abs(prevHeadYawAngle - headYawAngle) > 0.02) {
+            // 変化を増幅させる
+            const y = headYawAngle * 2.5;
+            if (Math.abs(y) < Math.PI / 2) {
+              vrm.humanoid.getBoneNode(
+                VRMSchema.HumanoidBoneName.Head
+              )!.rotation.y = y;
+            }
+          }
+        }
+        setPrevHeadYawAngle(headYawAngle);
+      }
+
+      vrm.humanoid.getBoneNode(
+        VRMSchema.HumanoidBoneName.LeftUpperArm
+      )!.rotation.z = Math.PI / 3;
+      vrm.humanoid.getBoneNode(
+        VRMSchema.HumanoidBoneName.RightUpperArm
+      )!.rotation.z = -Math.PI / 3;
+
+      // update vrm
+      vrm.update(deltaTime);
+    }
+    renderer.render(scene, camera);
+    requestAnimationFrame(render);
+  };
+
+  const loop = async (video: TNetInput) => {
+    if (!faceapi.nets.tinyFaceDetector.params) {
+      setTimeout(() => loop(video));
+    }
+    // Exampleを参考に設定
+    const option = new faceapi.TinyFaceDetectorOptions({
+      inputSize: 224,
+      scoreThreshold: 0.5,
+    });
+    const result = await faceapi
+      .detectSingleFace(video, option)
+      .withFaceLandmarks()
+      .withFaceExpressions();
+    if (result) {
+      // デバッグをしつつ決めた値をスレッショルドとする(表情筋が硬い場合は下げようね！)
+      if (result.expressions.happy > 0.7) {
+        setSmiling(true);
+      }
+      // 頭部回転角度を鼻のベクトルに近似する
+      // 68landmarksの定義から鼻のベクトルを求める
+      const upperNose = result.landmarks.positions[27];
+      const lowerNose = result.landmarks.positions[30];
+      const noseVec = lowerNose.sub(upperNose);
+      const noseVec2 = new THREE.Vector2(noseVec.x, noseVec.y);
+      // angle関数はx+方向を基準に角度を求めるため、π/2引いておき、逆回転のマイナスをかける
+      setHeadYawAngle(-(noseVec2.angle() - Math.PI / 2));
+      // リップシンク
+      // 68landmarksの定義から、口の垂直距離を測る
+      const upperLip = result.landmarks.positions[51];
+      const lowerLip = result.landmarks.positions[57];
+      setLipDist(lowerLip.y - upperLip.y);
+      /*
+              // デバッグ用にcanvasに表示する
+              if (landmarkCanvas) {
+                const dims = faceapi.matchDimensions(
+                  landmarkCanvas,
+                  video,
+                  true
+                );
+                const resizedResult = faceapi.resizeResults(result, dims);
+                faceapi.draw.drawFaceLandmarks(landmarkCanvas, resizedResult);
+              }*/
+    }
+
+    setTimeout(() => loop(video));
+  };
+
+  // 瞬き設定
+  setInterval(() => {
+    if (Math.random() < 0.15) {
+      setBlinking(true);
+    }
+  }, 1000);
+
   useEffect(() => {
-    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-    const canvasContext = canvas.getContext("2d");
-    setContext(canvas);
+    if ($body) {
+      $body.insertBefore($avatarCanvas, $body.firstChild);
+    }
+
+    // canvas取得など
+    // const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    // const canvasContext = canvas.getContext("2d");
+    // setLandmarkCanvas(canvas);
+
+    // vrm モデル読み込み
+    loader.load(
+      VRMPath,
+      (gltf) => {
+        VRM.from(gltf).then((vrmModel) => {
+          setVRM(vrmModel);
+          if (vrmModel) {
+            scene.add(vrmModel.scene);
+            if (
+              vrmModel.humanoid?.getBoneNode(VRMSchema.HumanoidBoneName.Hips)
+            ) {
+              vrmModel.humanoid.getBoneNode(
+                VRMSchema.HumanoidBoneName.Hips
+              )!.rotation.y = Math.PI;
+            }
+            console.log(vrm);
+          }
+        });
+      },
+      (progress) =>
+        console.log(
+          "Loading model...",
+          100.0 * (progress.loaded / progress.total),
+          "%"
+        ),
+      (error) => console.error(error)
+    );
   }, []);
 
   useEffect(() => {
+    // model読み込みなど
     const loadModels = async () => {
       const MODEL_URL = process.env.PUBLIC_URL + "/models";
 
@@ -36,13 +243,18 @@ export const Test = () => {
 
   const startVideo = () => {
     setCaptureVideo(true);
+    elm?.appendChild(renderer.domElement);
+    render();
     navigator.mediaDevices
       .getUserMedia({ video: { width: 300 } })
       .then((stream) => {
         const video = videoRef.current;
         if (video) {
-          video.srcObject = stream as MediaStream;
+          video.srcObject = stream;
           video.play();
+
+          console.log(vrm);
+          loop(video);
         }
       })
       .catch((err) => {
@@ -51,18 +263,20 @@ export const Test = () => {
   };
 
   const handleVideoOnPlay = () => {
+    // いらないかも
+    // landmark描画など
     setInterval(async () => {
-      if (context) {
+      if (landmarkCanvas) {
         if (videoRef.current) {
           // canvasRef.current = faceapi.createCanvasFromMedia(videoRef.current);
-          setContext(faceapi.createCanvasFromMedia(videoRef.current));
+          setLandmarkCanvas(faceapi.createCanvasFromMedia(videoRef.current));
         }
         const displaySize = {
           width: videoWidth,
           height: videoHeight,
         };
 
-        faceapi.matchDimensions(context, displaySize);
+        faceapi.matchDimensions(landmarkCanvas, displaySize);
 
         let detections;
         if (videoRef.current) {
@@ -74,17 +288,22 @@ export const Test = () => {
             .withFaceLandmarks()
             .withFaceExpressions();
         }
-        const resizedDetections = faceapi.resizeResults(
+        const resizedDetections: any = faceapi.resizeResults(
           detections,
           displaySize
-        ) as TDrawDetectionsInput | TDrawDetectionsInput[] | any;
+        );
 
-        context.getContext("2d")?.clearRect(0, 0, videoWidth, videoHeight);
+        landmarkCanvas
+          .getContext("2d")
+          ?.clearRect(0, 0, videoWidth, videoHeight);
 
-        context && faceapi.draw.drawDetections(context, resizedDetections);
+        landmarkCanvas &&
+          faceapi.draw.drawDetections(landmarkCanvas, resizedDetections);
 
-        context && faceapi.draw.drawFaceLandmarks(context, resizedDetections);
-        context && faceapi.draw.drawFaceExpressions(context, resizedDetections);
+        landmarkCanvas &&
+          faceapi.draw.drawFaceLandmarks(landmarkCanvas, resizedDetections);
+        landmarkCanvas &&
+          faceapi.draw.drawFaceExpressions(landmarkCanvas, resizedDetections);
       }
     }, 100);
   };
@@ -141,11 +360,12 @@ export const Test = () => {
             ref={videoRef}
             height={videoHeight}
             width={videoWidth}
-            onPlay={handleVideoOnPlay}
             style={{ borderRadius: "10px" }}
+            onPlay={handleVideoOnPlay}
           />
           <canvas id="canvas" style={{ position: "absolute" }} />
         </div>
+        <div ref={mountRef} id="vtuber" />
       </div>
     </div>
   );
